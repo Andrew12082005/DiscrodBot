@@ -34,8 +34,8 @@ class Database:
             # Ensure headers match user request
             ws = self.sh.sheet1
             headers = ws.row_values(1)
-            # Schema from user image: Status, Group, Assigned By, Assigned To, Due Date, Task Name, Task Inform, Link
-            expected_headers = ['Status', 'Group', 'Assigned By', 'Assigned To', 'Due Date', 'Task Name', 'Task Information', 'Link']
+            # Schema from user image: Status, Group, Assigned By, Assigned To, Assigned Date, Due Date, Task Name, Task Inform, Link
+            expected_headers = ['Status', 'Group', 'Assigned By', 'Assigned To', 'Assigned Date', 'Due Date', 'Task Name', 'Task Information', 'Link']
             
             # If empty, set headers
             if not headers:
@@ -53,10 +53,13 @@ class Database:
 
         ws = self.sh.sheet1
         
-        # Columns: Status, Group, Assigned By, Assigned To, Due Date, Task Name, Task Inform, Link
-        # Mapped: 'Pending', 'General', author_id, assignee_id, due_date, description, channel_id, jump_url
+        import datetime
+        assigned_date = datetime.datetime.now().strftime("%Y/%m/%d")
+
+        # Columns: Status, Group, Assigned By, Assigned To, Assigned Date, Due Date, Task Name, Task Inform, Link
+        # Mapped: 'Pending', 'General', author_id, assignee_id, assigned_date, due_date, description, channel_id, jump_url
         
-        ws.append_row(['Pending', 'General', str(author_id), str(assignee_id), str(due_date), description, str(channel_id), jump_url])
+        ws.append_row(['Pending', 'General', str(author_id), str(assignee_id), str(assigned_date), str(due_date), description, str(channel_id), jump_url])
         return jump_url # Return unique identifier
 
     def get_pending_tasks(self):
@@ -82,6 +85,13 @@ class Database:
         except gspread.CellNotFound:
             print(f"Task with link {task_link} not found.")
 
-
+    def update_task_status_by_row(self, row_index, new_status):
+        if not self.sh:
+            self.connect()
+        if not self.sh:
+            return
+        ws = self.sh.sheet1
+        # Status is Col 1
+        ws.update_cell(row_index, 1, new_status)
 
 db = Database()

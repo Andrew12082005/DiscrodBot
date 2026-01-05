@@ -22,49 +22,80 @@ class Reminders(commands.Cog):
             pending_tasks = db.get_pending_tasks()
             now = datetime.datetime.now()
 
-            for task in pending_tasks:
+            for i, task in enumerate(pending_tasks):
+                row_index = i + 2 # Header is row 1
                 status = task.get('Status', '')
                 
                 # Logic 1: Immediate trigger if Status is 'Actived'
                 # Logic 2: Due date trigger if Status is 'Pending' (Optional, keeping purely valid Pending logic)
                 
+                # Safety: Ensure Link ID exists to avoid infinite spam (since we can't update status without it)
+                if not task.get('Link'):
+                    # Only warn once per loop? or just ignore?
+                    # valid tasks must have a link (or some unique ID) to be updatable.
+                    continue
+
                 trigger = False
+            
                 
-                if status == 'Actived':
+                # Logic 3: User Request - "make Sent to trigger and change to Actived"
+                # This creates a cycle: Sent -> Actived -> Pending -> Sent
+                if status == 'Sent':
                     trigger = True
                 
-                # Check due date for Pending tasks (optional, but good to keep)
-                # If user strictly wants Status trigger, we can comment this out, 
-                # but usually a Reminder bot should remind on time too.
-                # However, the user said "Status will trigger", so let's prioritize that for now.
-                # Let's support both: 'Actived' sends immediately. 'Pending' checks time.
-                elif status == 'Pending':
-                    due_str = task.get('Due Date', '')
-                    if due_str:
-                        due_date = dateparser.parse(due_str)
-                        if due_date and due_date <= now:
-                           trigger = True
 
                 if trigger:
-                    # 1. Resolve Channel (Task Information)
+                    # 1. Resolve Channel
                     target_channel = None
-                    inform_val = str(task.get('Task Information', '')).strip()
                     
-                    if inform_val.isdigit():
-                        target_channel = self.bot.get_channel(int(inform_val))
+                    # RESTRICTION CHECK
+                    import os
+                    allowed_ids_str = os.getenv('ALLOWED_CHANNEL_IDS')
+                    allowed_ids = []
+                    
+                    # Parse multiple IDs
+                    if allowed_ids_str:
+                        allowed_ids = [x.strip() for x in allowed_ids_str.split(',') if x.strip()]
+                    
+                    # Backward compatibility for single ID (Robust split)
+                    old_id = os.getenv('ALLOWED_CHANNEL_ID')
+                    if old_id:
+                        extras = [x.strip() for x in old_id.split(',') if x.strip()]
+                        for x in extras:
+                            if x not in allowed_ids:
+                                allowed_ids.append(x)
+
+                    # Logic Update: User confirmed "Task Information" is JUST DATA, not a channel name.
+                    # Priority: 
+                    # 1. Use Allowed Channel (first one) if configured.
+                    # 2. Only check Task Information if NO allowed channels are set (Legacy behavior).
+
+                    if allowed_ids:
+                         # Use the first allowed channel
+                         first_id = allowed_ids[0]
+                         try:
+                             if first_id.isdigit():
+                                 target_channel = self.bot.get_channel(int(first_id))
+                             else: 
+                                 target_channel = discord.utils.get(self.bot.get_all_channels(), name=first_id)
+                             
+                             if not target_channel:
+                                 print(f"❌ Default allowed channel '{first_id}' not found!")
+                         except Exception as e:
+                             print(f"Error resolving default channel: {e}")
+
                     else:
-                        # Try to find by name (exact)
-                        target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val)
-                        
-                        # Try case-insensitive if not found
-                        if not target_channel:
-                             # Discord text channels are usually lowercase.
-                             target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val.lower())
-                    
+                        # Legacy: Try to resolve from Task Info if no restrictions
+                        inform_val = str(task.get('Task Information', '')).strip()
+                        if inform_val.isdigit():
+                            target_channel = self.bot.get_channel(int(inform_val))
+                        else:
+                            target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val)
+                            if not target_channel:
+                                 target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val.lower())
+
                     if not target_channel:
-                         print(f"❌ Channel '{inform_val}' not found for task '{task.get('Task Name')}'")
-                         # Debug: List available channels
-                         print("Available channels:", [c.name for c in self.bot.get_all_channels()])
+                         print(f"❌ Channel '{inform_val}' (or restricted fallback) not found for task '{task.get('Task Name')}'")
                          continue
 
                     # 2. Resolve User (Assigned To)
@@ -116,6 +147,7 @@ class Reminders(commands.Cog):
                                  assigned_by_str = found_author.mention
                     
                     # 4. Send Message
+                    todaydate = task.get('Assigned Date', '')
                     group_val = task.get('Group', '')
                     task_name = task.get('Task Name', 'Unnamed Task')
                     due_disp = task.get('Due Date', 'No due date')
@@ -123,24 +155,71 @@ class Reminders(commands.Cog):
                     link_val = task.get('Link', '')
                     
                     msg_content = (
-                        f"Group : **{group_val}**\n"
+                        f"**{group_val} {todaydate} **工作分配\n"
                         f"Assigned By : {assigned_by_str}\n"
                         f"Assigned To : {mention_str}\n"
                         f"Task : **{task_name}**\n"
                         f"Task Information : **{task_inform_val}**\n"
                         f"Due Date : **{due_disp}**\n"
-                        f"Link : {link_val}\n"
+                        f"請將文件/簡報上傳至{link_val}\n"
                     )
                     
-                    await target_channel.send(msg_content)
-                    
-                    # 5. Update Status
-                    link_id = task.get('Link')
-                    if not link_id:
-                        print("Error: No Link ID provided for task update.")
-                    else:
-                        db.update_task_status(link_id, 'Sent')
+                    try:
+                        await target_channel.send(msg_content)
+                        
+                        # 5. Update Status
+                        
+                        # Determine new status based on current status
+                        # Sent -> Actived (Restart Cycle)
+                        new_status = 'Sent'
+                        if status == 'Sent':
+                            new_status = 'Actived'
 
+                        db.update_task_status_by_row(row_index, new_status)
+                            
+                    except discord.Forbidden:
+                         print(f"❌ 403 Forbidden: I do not have permission to send messages in channel '{target_channel.name}' (ID: {target_channel.id}). Checking alternatives...")
+                         
+                         fallback_success = False
+                         if allowed_ids:
+                             for alt_id in allowed_ids:
+                                 # Skip if it's the same channel we just tried
+                                 if str(target_channel.id) == str(alt_id):
+                                     continue
+                                 
+                                 # Try fetching alternative
+                                 alt_channel = None
+                                 if alt_id.isdigit():
+                                     alt_channel = self.bot.get_channel(int(alt_id))
+                                 else:
+                                     alt_channel = discord.utils.get(self.bot.get_all_channels(), name=alt_id)
+                                 
+                                 if alt_channel:
+                                     print(f"🔄 Attempting fallback to allowed channel: {alt_channel.name} (ID: {alt_channel.id})...")
+                                     try:
+                                         await alt_channel.send(msg_content)
+                                         print(f"✅ Fallback successful!")
+                                         
+                                         # Determine new status based on current status
+                                         # Sent -> Actived (Restart Cycle)
+                                         new_status = 'Sent'
+                                         if status == 'Sent':
+                                             new_status = 'Actived'
+
+                                         db.update_task_status_by_row(row_index, new_status)
+                                         fallback_success = True
+                                         break # Stop trying
+                                     except Exception as ex:
+                                          print(f"❌ Fallback failed for {alt_channel.name}: {ex}")
+                         
+                         if not fallback_success:
+                             print("❌ All attempts failed. Skipping task.")
+                             link_id = task.get('Link')
+                             if link_id:
+                                 db.update_task_status(link_id, 'Skipped')
+                             
+                    except Exception as e:
+                         print(f"❌ Failed to send message: {e}")
 
         except Exception as e:
             print(f"Error in reminder loop: {e}")
