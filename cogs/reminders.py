@@ -43,6 +43,23 @@ class Reminders(commands.Cog):
                 if status == 'Sent':
                     trigger = True
                 
+                # Logic: Automatic Expiration
+                # If status is Pending and Due Date is passed -> Expired
+                due_date_str = task.get('Due Date')
+                if status == 'Pending' and due_date_str:
+                    try:
+                        due_date = dateparser.parse(due_date_str)
+                        # Ensure we don't expire if it's just 'today' but time hasn't passed? 
+                        # Dateparser 'tomorrow' -> tomorrow at 00:00 usually? 
+                        # Let's assume strict inequality.
+                        if due_date and due_date < now:
+                            print(f"🕰️ Task '{task.get('Task Name')}' is overdue (Due: {due_date}). Marking as Expired.")
+                            db.update_task_status_by_row(row_index, 'Expired')
+                            continue # Skip further processing
+                    except Exception as e:
+                        print(f"Error checking expiration for task '{task.get('Task Name')}': {e}")
+
+                
 
                 if trigger:
                     # 1. Resolve Channel
@@ -154,18 +171,27 @@ class Reminders(commands.Cog):
                     task_inform_val = task.get('Task Information', '')
                     link_val = task.get('Link', '')
                     
-                    msg_content = (
-                        f"**{group_val} {todaydate} **工作分配\n"
-                        f"Assigned By : {assigned_by_str}\n"
-                        f"Assigned To : {mention_str}\n"
-                        f"Task : **{task_name}**\n"
-                        f"Task Information : **{task_inform_val}**\n"
-                        f"Due Date : **{due_disp}**\n"
-                        f"請將文件/簡報上傳至{link_val}\n"
+                    # Create Embed
+                    embed = discord.Embed(
+                        description=f"# {group_val} {todaydate} 工作分配\n# **Task : {task_name}**",
+                        color=discord.Color.from_rgb(0, 255, 255) # Cyan/Aqua-like color
                     )
                     
+                    embed.add_field(name="Assigned By", value=assigned_by_str, inline=True)
+                    embed.add_field(name="Assigned To", value=mention_str, inline=True)
+                    # Inline empty field for spacing if needed, or just let them wrap
+                    
+                    embed.add_field(name="**Task Information**", value=f"{task_inform_val}", inline=False)
+                    embed.add_field(name="Due Date", value=f"**{due_disp}**", inline=True)
+                    
+                    # For Link, we can make it clickable if it's a URL, otherwise just text
+                    if link_val.startswith('http'):
+                        embed.add_field(name="Upload Link", value=f"[Click Here]({link_val})", inline=True)
+                    else:
+                        embed.add_field(name="Upload Link", value=f"{link_val}", inline=True)
+                    
                     try:
-                        await target_channel.send(msg_content)
+                        await target_channel.send(embed=embed)
                         
                         # 5. Update Status
                         
@@ -197,7 +223,7 @@ class Reminders(commands.Cog):
                                  if alt_channel:
                                      print(f"🔄 Attempting fallback to allowed channel: {alt_channel.name} (ID: {alt_channel.id})...")
                                      try:
-                                         await alt_channel.send(msg_content)
+                                         await alt_channel.send(embed=embed)
                                          print(f"✅ Fallback successful!")
                                          
                                          # Determine new status based on current status
