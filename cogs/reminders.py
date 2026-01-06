@@ -13,7 +13,7 @@ class Reminders(commands.Cog):
     def cog_unload(self):
         self.check_reminders.cancel()
 
-    @tasks.loop(seconds=20)
+    @tasks.loop(seconds=10)
     async def check_reminders(self):
         # Prevent running before bot is ready
         if not self.bot.is_ready():
