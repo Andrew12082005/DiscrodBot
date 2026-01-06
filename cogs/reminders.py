@@ -13,6 +13,36 @@ class Reminders(commands.Cog):
     def cog_unload(self):
         self.check_reminders.cancel()
 
+    def resolve_users(self, guild, text):
+        if not text:
+            return "Unknown"
+        
+        parts = [x.strip() for x in text.split(',') if x.strip()]
+        if not parts:
+            return "Unknown"
+            
+        results = []
+        for p in parts:
+            found = p
+            if p.isdigit():
+                found = f"<@{p}>"
+            elif guild:
+                target = p.lower()
+                # 1. Exact Name/Nick Match
+                for m in guild.members:
+                     if target == m.name.lower() or target == m.display_name.lower():
+                         found = m.mention
+                         break
+                
+                # 2. Fuzzy/Partial Match
+                if found == p:
+                     for m in guild.members:
+                         if target in m.name.lower() or (m.display_name and target in m.display_name.lower()):
+                             found = m.mention
+                             break
+            results.append(found)
+        return ", ".join(results)
+
     @tasks.loop(seconds=10)
     async def check_reminders(self):
         # Prevent running before bot is ready
@@ -40,15 +70,25 @@ class Reminders(commands.Cog):
                 if status == 'Sent':
                     trigger = True
                 
-                # Logic: Automatic Expiration
+                # Logic: Automatic Expiration & Pending Trigger
                 due_date_str = task.get('Due Date')
+                embed_color = discord.Color.from_rgb(0, 255, 255) # Default Cyan
+
                 if status == 'Pending' and due_date_str:
                     try:
                         due_date = dateparser.parse(due_date_str)
-                        if due_date and due_date < now:
-                            print(f"🕰️ Task '{task.get('Task Name')}' is overdue (Due: {due_date}). Marking as Expired.")
-                            db.update_task_status_by_row(row_index, 'Expired')
-                            continue 
+                        if due_date:
+                            # Using current time 'now' from outer scope
+                            if due_date < now:
+                                # Logic change: Pending NEVER triggers independently. 
+                                # It waits for user/system to set it to 'Sent'.
+                                # We only check for pure expiration here.
+                                
+                                # If it's overdue, mark as Expired.
+                                print(f"🕰️ Task '{task.get('Task Name')}' is overdue (Due: {due_date}). Marking as Expired.")
+                                # Use Link ID for update
+                                db.update_task_status(task.get('Link'), 'Expired')
+                                continue 
                     except Exception as e:
                         print(f"Error checking expiration for task '{task.get('Task Name')}': {e}")
 
@@ -60,15 +100,19 @@ class Reminders(commands.Cog):
                 group_val = task.get('Group', '').strip()
                 allowed_ids_str = None
                 
-                # 2. 根據群組對應到 .env 變數
+                # 2. 根據群組對應到 .env 變數 & 設定顏色
                 if group_val == "Propulsion 推進組":
                     allowed_ids_str = os.getenv('Propulsion_CHANNEL_ID')
-                elif group_val == "Avionics 航電組": # 請確認資料庫內是「組」還是「阻」
+                    embed_color = discord.Color.red()
+                elif group_val == "Avionics 航電組": 
                     allowed_ids_str = os.getenv('Avionics_CHANNEL_ID')
+                    embed_color = discord.Color.blue()
                 elif group_val == "Structure 結構組":
                     allowed_ids_str = os.getenv('Structure_CHANNEL_ID')
-                elif group_val == "Machining 加工組": # 新增加工組
+                    embed_color = discord.Color.orange()
+                elif group_val == "Machining 加工組": 
                     allowed_ids_str = os.getenv('Machining_CHANNEL_ID')
+                    embed_color = discord.Color.green()
                 
                 allowed_ids = []
                 
@@ -132,44 +176,13 @@ class Reminders(commands.Cog):
 
                     # 2. Resolve User (Assigned To)
                     assignee_val = str(task.get('Assigned To', '')).strip()
-                    mention_str = assignee_val 
-                    
-                    if assignee_val.isdigit():
-                         mention_str = f"<@{assignee_val}>"
-                    else:
-                         if hasattr(target_channel, 'guild'):
-                             found_member = None
-                             target_name = assignee_val.lower()
-                             
-                             # DEBUG: Check if we can see members
-                             members = target_channel.guild.members
-                             # print(f"DEBUG: Searching for '{target_name}' in {len(members)} members...")
-                             
-                             for m in members:
-                                 if target_name in m.name.lower() or (m.display_name and target_name in m.display_name.lower()):
-                                     found_member = m
-                                     break
-                             
-                             if found_member:
-                                 mention_str = found_member.mention
+                    guild_obj = target_channel.guild if hasattr(target_channel, 'guild') else None
+                    mention_str = self.resolve_users(guild_obj, assignee_val)
 
                     # 3. Resolve Assigned By User
                     assigned_by_val = str(task.get('Assigned By', 'Unknown')).strip()
-                    assigned_by_str = assigned_by_val
-                    
-                    if assigned_by_val.isdigit():
-                         assigned_by_str = f"<@{assigned_by_val}>"
-                    else:
-                         if hasattr(target_channel, 'guild'):
-                             found_author = None
-                             target_name = assigned_by_val.lower()
-                             for m in target_channel.guild.members:
-                                 if target_name in m.name.lower() or (m.display_name and target_name in m.display_name.lower()):
-                                     found_author = m
-                                     break
-                             
-                             if found_author:
-                                 assigned_by_str = found_author.mention
+                    guild_obj = target_channel.guild if hasattr(target_channel, 'guild') else None
+                    assigned_by_str = self.resolve_users(guild_obj, assigned_by_val)
                     
                     # 4. Send Message
                     todaydate = task.get('Assigned Date', '')
@@ -181,7 +194,7 @@ class Reminders(commands.Cog):
                     # Create Embed
                     embed = discord.Embed(
                         description=f"# {group_val} {todaydate} 工作分配\n# **Task : {task_name}**",
-                        color=discord.Color.from_rgb(0, 255, 255)
+                        color=embed_color
                     )
                     
                     embed.add_field(name="Assigned By", value=assigned_by_str, inline=True)
@@ -231,7 +244,7 @@ class Reminders(commands.Cog):
                         if status == 'Sent':
                             new_status = 'Actived'
 
-                        db.update_task_status_by_row(row_index, new_status)
+                        db.update_task_status(link_val, new_status)
                             
                     except discord.Forbidden:
                          print(f"❌ 403 Forbidden: No permission in '{target_channel.name}'. Checking alternatives...")
@@ -259,7 +272,7 @@ class Reminders(commands.Cog):
                                          if status == 'Sent':
                                              new_status = 'Actived'
 
-                                         db.update_task_status_by_row(row_index, new_status)
+                                         db.update_task_status(link_val, new_status)
                                          fallback_success = True
                                          break
                                      except Exception as ex:
