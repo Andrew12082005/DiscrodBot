@@ -2,7 +2,7 @@ from discord.ext import commands, tasks
 import discord
 import datetime
 import dateparser
-import os  # 將 import 移到最上方比較規範
+import os
 from database import db
 
 class Reminders(commands.Cog):
@@ -14,13 +14,8 @@ class Reminders(commands.Cog):
         self.check_reminders.cancel()
 
     def resolve_users(self, guild, text):
-        if not text:
-            return "Unknown"
-        
+        if not text: return "Unknown"
         parts = [x.strip() for x in text.split(',') if x.strip()]
-        if not parts:
-            return "Unknown"
-            
         results = []
         for p in parts:
             found = p
@@ -28,13 +23,10 @@ class Reminders(commands.Cog):
                 found = f"<@{p}>"
             elif guild:
                 target = p.lower()
-                # 1. Exact Name/Nick Match
                 for m in guild.members:
                      if target == m.name.lower() or target == m.display_name.lower():
                          found = m.mention
                          break
-                
-                # 2. Fuzzy/Partial Match
                 if found == p:
                      for m in guild.members:
                          if target in m.name.lower() or (m.display_name and target in m.display_name.lower()):
@@ -45,7 +37,6 @@ class Reminders(commands.Cog):
 
     @tasks.loop(seconds=10)
     async def check_reminders(self):
-        # Prevent running before bot is ready
         if not self.bot.is_ready():
             return
 
@@ -53,54 +44,38 @@ class Reminders(commands.Cog):
             pending_tasks = db.get_pending_tasks()
             now = datetime.datetime.now()
 
+            # 使用 enumerate 取得 index (i)
             for i, task in enumerate(pending_tasks):
-                row_index = i + 2 # Header is row 1
+                # ★ 關鍵：計算正確的行數
+                # get_all_records 跳過了標題列 (Row 1)，所以資料是從 Row 2 開始
+                current_row_index = i + 2
+                
                 status = task.get('Status', '')
-                
-                # Logic 1: Immediate trigger if Status is 'Actived'
-                # Logic 2: Due date trigger if Status is 'Pending'
-                
-                # Safety: Ensure Link ID exists to avoid infinite spam
-                if not task.get('Link'):
-                    continue
 
-                trigger = False
-            
-                # Logic 3: User Request - "make Sent to trigger and change to Actived"
-                if status == 'Sent':
-                    trigger = True
-                
-                # Logic: Automatic Expiration & Pending Trigger
+                # 邏輯 1: 過期檢查 (Pending -> Expired)
                 due_date_str = task.get('Due Date')
-                embed_color = discord.Color.from_rgb(0, 255, 255) # Default Cyan
-
                 if status == 'Pending' and due_date_str:
                     try:
                         due_date = dateparser.parse(due_date_str)
-                        if due_date:
-                            # Using current time 'now' from outer scope
-                            if due_date < now:
-                                # Logic change: Pending NEVER triggers independently. 
-                                # It waits for user/system to set it to 'Sent'.
-                                # We only check for pure expiration here.
-                                
-                                # If it's overdue, mark as Expired.
-                                print(f"🕰️ Task '{task.get('Task Name')}' is overdue (Due: {due_date}). Marking as Expired.")
-                                # Use Link ID for update
-                                db.update_task_status(task.get('Link'), 'Expired')
-                                continue 
+                        if due_date and due_date < now:
+                            print(f"🕰️ Task '{task.get('Task Name')}' is overdue. Marking Row {current_row_index} as Expired.")
+                            db.update_task_status_by_row(current_row_index, 'Expired')
+                            continue 
                     except Exception as e:
-                        print(f"Error checking expiration for task '{task.get('Task Name')}': {e}")
+                        print(f"Error checking expiration: {e}")
 
-                # ==========================================
-                # ★ 修改開始：群組頻道解析邏輯 (Fix Start)
-                # ==========================================
-                
-                # 1. 先取得群組名稱 (去除前後空白)
+                # 邏輯 2: 發送觸發 (只有 Status 為 'Sent' 時執行)
+                if status != 'Sent':
+                    continue
+
+                # ==========================
+                # 準備發送訊息
+                # ==========================
                 group_val = task.get('Group', '').strip()
+                embed_color = discord.Color.from_rgb(0, 255, 255) # Default Cyan
+
+                # 1. 判斷群組顏色與 ID
                 allowed_ids_str = None
-                
-                # 2. 根據群組對應到 .env 變數 & 設定顏色
                 if group_val == "Propulsion 推進組":
                     allowed_ids_str = os.getenv('Propulsion_CHANNEL_ID')
                     embed_color = discord.Color.red()
@@ -115,188 +90,97 @@ class Reminders(commands.Cog):
                     embed_color = discord.Color.green()
                 
                 allowed_ids = []
-                
-                # 3. 解析群組專屬 ID
                 if allowed_ids_str:
                     allowed_ids = [x.strip() for x in allowed_ids_str.split(',') if x.strip()]
-                
-                # 3.5 加入 Admin_ID (Essential for Fallback & Admin Copy validation)
-                admin_id_env = os.getenv('Admin_ID')
-                if admin_id_env:
-                     admin_ids = [x.strip() for x in admin_id_env.split(',') if x.strip()]
-                     for x in admin_ids:
-                         if x not in allowed_ids:
-                             allowed_ids.append(x)
-                
-                # 4. 加入全域/舊版允許 ID (Backward compatibility)
-                # 支援 ALLOWED_CHANNEL_IDS 或 ALLOWED_CHANNEL_ID
-                global_ids_str = os.getenv('ALLOWED_CHANNEL_IDS') or os.getenv('ALLOWED_CHANNEL_ID')
-                if global_ids_str:
-                    extras = [x.strip() for x in global_ids_str.split(',') if x.strip()]
-                    for x in extras:
-                        if x not in allowed_ids:
-                            allowed_ids.append(x)
 
+                # 2. 決定目標頻道
                 target_channel = None
-
-                if trigger:
-                    print(f"DEBUG: Processing task '{task.get('Task Name')}'. Group: '{group_val}'")
-                    
-                    # 優先權 1: 如果有設定允許清單 (allowed_ids)，抓第一個當作目標
-                    if allowed_ids:
-                         first_id = allowed_ids[0]
-                         try:
-                             if first_id.isdigit():
-                                 target_channel = self.bot.get_channel(int(first_id))
-                             else: 
-                                 target_channel = discord.utils.get(self.bot.get_all_channels(), name=first_id)
-                             
-                             if not target_channel:
-                                 print(f"❌ Default allowed channel '{first_id}' not found!")
-                         except Exception as e:
-                             print(f"Error resolving default channel: {e}")
-
-                    else:
-                        # 優先權 2 (Legacy): 如果完全沒有設定環境變數，才從 Task Information 抓
-                        inform_val = str(task.get('Task Information', '')).strip()
-                        if inform_val.isdigit():
-                            target_channel = self.bot.get_channel(int(inform_val))
-                        else:
-                            target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val)
-                            if not target_channel:
-                                 target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val.lower())
-
-                    if not target_channel:
-                         print(f"❌ Channel not found for task '{task.get('Task Name')}' (Group: {group_val})")
-                         continue
                 
-                # ==========================================
-                # ★ 修改結束 (Fix End)
-                # ==========================================
-
-                    # 2. Resolve User (Assigned To)
-                    assignee_val = str(task.get('Assigned To', '')).strip()
-                    guild_obj = target_channel.guild if hasattr(target_channel, 'guild') else None
-                    mention_str = self.resolve_users(guild_obj, assignee_val)
-
-                    # 3. Resolve Assigned By User
-                    assigned_by_val = str(task.get('Assigned By', 'Unknown')).strip()
-                    guild_obj = target_channel.guild if hasattr(target_channel, 'guild') else None
-                    assigned_by_str = self.resolve_users(guild_obj, assigned_by_val)
-                    
-                    # 4. Send Message
-                    todaydate = task.get('Assigned Date', '')
-                    task_name = task.get('Task Name', 'Unnamed Task')
-                    due_disp = task.get('Due Date', 'No due date')
-                    task_inform_val = task.get('Task Information', '')
-                    link_val = task.get('Link', '')
-                    
-                    # Create Embed
-                    embed = discord.Embed(
-                        description=f"# {group_val} {todaydate} 工作分配\n# **Task : {task_name}**",
-                        color=embed_color
-                    )
-                    
-                    embed.add_field(name="Assigned By", value=assigned_by_str, inline=True)
-                    embed.add_field(name="Assigned To", value=mention_str, inline=True)
-                    embed.add_field(name="**Task Information**", value=f"{task_inform_val}", inline=False)
-                    embed.add_field(name="Due Date", value=f"**{due_disp}**", inline=True)
-                    
-                    if link_val.startswith('http'):
-                        embed.add_field(name="Upload Link", value=f"[Click Here]({link_val})", inline=True)
+                # 優先使用 Env 設定的頻道
+                if allowed_ids:
+                     first_id = allowed_ids[0]
+                     try:
+                         if first_id.isdigit():
+                             target_channel = self.bot.get_channel(int(first_id))
+                         else: 
+                             target_channel = discord.utils.get(self.bot.get_all_channels(), name=first_id)
+                     except: pass
+                
+                # 若無 Env 設定，嘗試使用 Task Information (Legacy)
+                if not target_channel:
+                    inform_val = str(task.get('Task Information', '')).strip()
+                    if inform_val.isdigit():
+                        target_channel = self.bot.get_channel(int(inform_val))
                     else:
-                        embed.add_field(name="Upload Link", value=f"{link_val}", inline=True)
-                    
-                    try:
-                        # 4.1 Send to Group Channel
-                        await target_channel.send(embed=embed)
-                        print(f"✅ Message sent to {target_channel.name} (ID: {target_channel.id})")
+                        target_channel = discord.utils.get(self.bot.get_all_channels(), name=inform_val)
 
-                        # ==========================================
-                        # ★ 新增：同步發送給 Admin (New)
-                        # ==========================================
-                        admin_id_str = os.getenv('Admin_ID')
-                        if admin_id_str:
-                             admin_ids = [x.strip() for x in admin_id_str.split(',') if x.strip()]
-                             for aid in admin_ids:
-                                 # 避免重複發送 (如果目標頻道就是 Admin 頻道)
-                                 if str(aid) == str(target_channel.id):
-                                     continue
+                if not target_channel:
+                     print(f"❌ Channel not found for Row {current_row_index}. Marking as Error.")
+                     db.update_task_status_by_row(current_row_index, 'Error-NoCh')
+                     continue
 
-                                 try:
-                                     admin_ch = None
-                                     if aid.isdigit():
-                                         admin_ch = self.bot.get_channel(int(aid))
-                                     else:
-                                         admin_ch = discord.utils.get(self.bot.get_all_channels(), name=aid)
-                                     
-                                     if admin_ch:
-                                         await admin_ch.send(embed=embed)
-                                         print(f"✅ Copied message to Admin Channel: {admin_ch.name}")
-                                     else:
-                                         print(f"⚠️ Admin channel ID '{aid}' not found.")
-                                 except Exception as admin_ex:
-                                     print(f"❌ Failed to copy to Admin Channel ({aid}): {admin_ex}")
-                        # ==========================================
+                # 3. 建立 Embed
+                assignee_val = str(task.get('Assigned To', '')).strip()
+                guild_obj = target_channel.guild
+                mention_str = self.resolve_users(guild_obj, assignee_val)
 
-                        # 5. Update Status
-                        new_status = 'Sent'
-                        if status == 'Sent':
-                            new_status = 'Actived'
+                assigned_by_val = str(task.get('Assigned By', 'Unknown')).strip()
+                assigned_by_str = self.resolve_users(guild_obj, assigned_by_val)
+                
+                todaydate = task.get('Assigned Date', '')
+                task_name = task.get('Task Name', 'Unnamed Task')
+                due_disp = task.get('Due Date', 'No due date')
+                task_inform_val = task.get('Task Information', '')
+                link_val = task.get('Link', '')
 
-                        db.update_task_status(link_val, new_status)
-                            
-                    except discord.Forbidden:
-                         print(f"❌ 403 Forbidden: No permission in '{target_channel.name}'. Checking alternatives...")
-                         
-                         fallback_success = False
-                         if allowed_ids:
-                             print(f"DEBUG: Fallback candidates: {allowed_ids}")
-                             for alt_id in allowed_ids:
-                                 if str(target_channel.id) == str(alt_id):
-                                     continue
-                                 
-                                 alt_channel = None
-                                 if alt_id.isdigit():
-                                     alt_channel = self.bot.get_channel(int(alt_id))
-                                 else:
-                                     alt_channel = discord.utils.get(self.bot.get_all_channels(), name=alt_id)
-                                 
-                                 if alt_channel:
-                                     print(f"🔄 Fallback to: {alt_channel.name}...")
-                                     try:
-                                         await alt_channel.send(embed=embed)
-                                         print(f"✅ Fallback successful!")
-                                         
-                                         new_status = 'Sent'
-                                         if status == 'Sent':
-                                             new_status = 'Actived'
+                embed = discord.Embed(
+                    description=f"# {group_val} {todaydate} 工作分配\n# **Task : {task_name}**",
+                    color=embed_color
+                )
+                embed.add_field(name="Assigned By", value=assigned_by_str, inline=True)
+                embed.add_field(name="Assigned To", value=mention_str, inline=True)
+                embed.add_field(name="**Task Information**", value=f"{task_inform_val}", inline=False)
+                embed.add_field(name="Due Date", value=f"**{due_disp}**", inline=True)
+                
+                if link_val.startswith('http'):
+                    embed.add_field(name="Upload Link", value=f"[Click Here]({link_val})", inline=True)
+                else:
+                    embed.add_field(name="Upload Link", value=f"{link_val}", inline=True)
+                
+                # 4. 發送並更新狀態
+                try:
+                    await target_channel.send(embed=embed)
+                    print(f"✅ Message sent to {target_channel.name}")
 
-                                         db.update_task_status(link_val, new_status)
-                                         fallback_success = True
-                                         break
-                                     except Exception as ex:
-                                          print(f"❌ Fallback failed: {ex}")
-                         
-                         if not fallback_success:
-                             print("❌ All attempts failed. Skipping task.")
-                             link_id = task.get('Link')
-                             if link_id:
-                                 db.update_task_status(link_id, 'Skipped')
-                             
-                    except Exception as e:
-                         print(f"❌ Failed to send message: {e}")
+                    # ★★★ 核心修改：利用行數更新狀態 ★★★
+                    # 如果這行失敗，表示機器人沒有 Google Sheet 的編輯權限
+                    db.update_task_status_by_row(current_row_index, 'Actived')
+
+                    # 額外功能：同步到 Admin 頻道
+                    admin_id_str = os.getenv('Admin_ID')
+                    if admin_id_str:
+                        admin_ids = [x.strip() for x in admin_id_str.split(',') if x.strip()]
+                        for aid in admin_ids:
+                            if str(aid) != str(target_channel.id):
+                                try:
+                                    ach = self.bot.get_channel(int(aid)) or discord.utils.get(self.bot.get_all_channels(), name=aid)
+                                    if ach: await ach.send(embed=embed)
+                                except: pass
+
+                except discord.Forbidden:
+                     print(f"❌ 403 Forbidden in {target_channel.name}")
+                     db.update_task_status_by_row(current_row_index, 'Error-Forbidden')
+                     
+                except Exception as e:
+                     print(f"❌ Failed to send message: {e}")
 
         except Exception as e:
             print(f"Error in reminder loop: {e}")
 
+    # ★ 這裡就是之前出錯的地方，現在已經修正為 check_reminders ★
     @check_reminders.before_loop
     async def before_check_reminders(self):
         await self.bot.wait_until_ready()
 
 async def setup(bot):
     await bot.add_cog(Reminders(bot))
-
-if __name__ == "__main__":
-    print("❌ ERROR: You are running this file directly!")
-    print("Please run 'main.py' in the main folder instead.")

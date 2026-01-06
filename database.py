@@ -12,86 +12,75 @@ class Database:
 
     def connect(self):
         creds_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'service_account.json')
-        sheet_name = os.getenv('GOOGLE_SHEET_NAME', 'DiscordBotTasks')
+        sheet_name = os.getenv('GOOGLE_SHEET_NAME', 'Task Assign System')
         
-        # Fallback if specific file is not found but default exists
-        if not os.path.exists(creds_file) and os.path.exists('service_account.json'):
-            print(f"Warning: Configured '{creds_file}' not found. Using 'service_account.json' instead.")
-            creds_file = 'service_account.json'
+        if not os.path.exists(creds_file):
+            print(f"⚠️ Warning: '{creds_file}' not found.")
             
         try:
             self.gc = gspread.service_account(filename=creds_file)
             try:
                 self.sh = self.gc.open(sheet_name)
+                print(f"✅ Successfully connected to Google Sheet: {sheet_name}")
             except gspread.SpreadsheetNotFound:
-                # We can't easily create and share, so we hope it exists. 
-                # If we create, it's private to the service account.
-                # Attempting to create anyway just in case they added the service account to a folder or something?
-                # Actually, safe to just error out or print warning if not found.
-                print(f"Spreadsheet '{sheet_name}' not found. Please create it and share with the service account.")
+                print(f"❌ Spreadsheet '{sheet_name}' not found.")
                 return 
 
-            # Ensure headers match user request
+            # 確保標題列存在
             ws = self.sh.sheet1
             headers = ws.row_values(1)
-            # Schema from user image: Status, Group, Assigned By, Assigned To, Assigned Date, Due Date, Task Name, Task Inform, Link
             expected_headers = ['Status', 'Group', 'Assigned By', 'Assigned To', 'Assigned Date', 'Due Date', 'Task Name', 'Task Information', 'Link']
             
-            # If empty, set headers
             if not headers:
                 ws.append_row(expected_headers)
             
         except Exception as e:
-            print(f"Database connection failed: {e}")
+            print(f"❌ Database connection failed: {e}")
 
     def add_task(self, description, assignee_id, author_id, due_date, channel_id, jump_url):
         if not self.sh:
             self.connect()
-        
-        if not self.sh:
-             raise Exception("Database not connected. Check server logs for API errors.")
-
         ws = self.sh.sheet1
-        
         import datetime
         assigned_date = datetime.datetime.now().strftime("%Y/%m/%d")
 
-        # Columns: Status, Group, Assigned By, Assigned To, Assigned Date, Due Date, Task Name, Task Inform, Link
-        # Mapped: 'Pending', 'General', author_id, assignee_id, assigned_date, due_date, description, channel_id, jump_url
-        
         ws.append_row(['Pending', 'General', str(author_id), str(assignee_id), str(assigned_date), str(due_date), description, str(channel_id), jump_url])
-        return jump_url # Return unique identifier
+        return jump_url
 
     def get_pending_tasks(self):
+        """
+        取得所有任務資料。
+        注意：gspread 的 get_all_records() 會回傳一個 List，
+        List 的 index 0 對應 Excel 的第 2 行 (因為第 1 行是標題)。
+        """
         if not self.sh:
             self.connect()
         if not self.sh:
             return []
-        ws = self.sh.sheet1
-        return ws.get_all_records()
-
-    def update_task_status(self, task_link, new_status):
-        if not self.sh:
-            self.connect()
-        if not self.sh:
-            return
-        ws = self.sh.sheet1
-        
-        # Find row by Link (Col 8)
         try:
-            cell = ws.find(task_link)
-            # Status is Col 1
-            ws.update_cell(cell.row, 1, new_status)
-        except gspread.CellNotFound:
-            print(f"Task with link {task_link} not found.")
+            ws = self.sh.sheet1
+            return ws.get_all_records()
+        except Exception as e:
+            print(f"Error reading tasks: {e}")
+            return []
 
     def update_task_status_by_row(self, row_index, new_status):
+        """
+        直接指定行數 (Row Index) 修改 Status (第 1 欄)。
+        """
         if not self.sh:
             self.connect()
         if not self.sh:
+            print("❌ Database not connected.")
             return
+
         ws = self.sh.sheet1
-        # Status is Col 1
-        ws.update_cell(row_index, 1, new_status)
+        try:
+            # update_cell(行, 列, 值) -> Status 在第 1 欄
+            ws.update_cell(row_index, 1, new_status)
+            print(f"📝 Database updated: Row {row_index} status set to '{new_status}'")
+        except Exception as e:
+            print(f"❌ Error updating row {row_index}: {e}")
+            # 如果是權限錯誤，這裡會印出來，請務必檢查 Console
 
 db = Database()
